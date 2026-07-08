@@ -694,13 +694,232 @@
       prevMonthBtn.addEventListener("click", () => { calendarDate.setMonth(calendarDate.getMonth() - 1); renderCalendar(); });
       nextMonthBtn.addEventListener("click", () => { calendarDate.setMonth(calendarDate.getMonth() + 1); renderCalendar(); });
 
-      function initializeFirebaseAuth() {
-        if (!isFirebaseInitialized) return;
-        firebaseAuth.onAuthStateChanged((user) => {
-          currentUser = user; updateFirebaseUI();
-          if (user) { if (storageMode === 'cloud' && currentTeacherId && currentClass) loadDataFromFirebase(); } else { if (storageMode === 'cloud') setStorageMode('local'); }
-        });
+      // ===== الدوال المعدلة للتخزين السحابي =====
+      
+      // دالة المزامنة التلقائية
+      async function syncDataFromFirebase() {
+          if (!isFirebaseInitialized || !currentUser || storageMode !== 'cloud') {
+              return false;
+          }
+          
+          if (!currentTeacherId || !currentClass) {
+              return false;
+          }
+          
+          try {
+              const path = FIREBASE_PATH();
+              if (!path) return false;
+              
+              const snapshot = await firebaseDb.ref(path).once('value');
+              const firebaseData = snapshot.val();
+              
+              if (firebaseData && firebaseData.datesData) {
+                  allHistoryData = firebaseData.datesData;
+                  localStorage.setItem(STORAGE_KEY_DATA(), JSON.stringify(allHistoryData));
+                  
+                  if (firebaseData.originalStudentNames) {
+                      originalStudentNames = firebaseData.originalStudentNames;
+                      localStorage.setItem(STORAGE_KEY_ORIGINAL_NAMES(), JSON.stringify(originalStudentNames));
+                  }
+                  
+                  // تحديث البيانات لليوم الحالي
+                  const dateKey = formattedSelectedDate();
+                  if (allHistoryData[dateKey]) {
+                      data = allHistoryData[dateKey];
+                  } else {
+                      data = {};
+                      allHistoryData[dateKey] = data;
+                  }
+                  
+                  updateDisplayNames();
+                  ensureAllStudentsInData();
+                  initStudentsUI();
+                  updateTable();
+                  updateDateDisplay();
+                  
+                  console.log("✅ تمت المزامنة التلقائية مع Firebase");
+                  return true;
+              }
+              return false;
+          } catch (error) {
+              console.error("❌ خطأ في المزامنة التلقائية:", error);
+              return false;
+          }
       }
+
+      // دالة loadData المعدلة
+      async function loadData() {
+          if (!currentTeacherId || !currentClass) return;
+          
+          let loaded = false;
+          
+          // إذا كان وضع السحابة مفعل وهناك مستخدم مسجل
+          if (storageMode === 'cloud' && currentUser) {
+              loaded = await loadFromFirebase();
+          }
+          
+          // إذا فشل تحميل البيانات من Firebase أو كان الوضع محلي
+          if (!loaded) {
+              loadDataFromLocalStorage();
+          }
+          
+          // إذا لم يتم تحميل أي بيانات، تهيئة بيانات فارغة
+          if (Object.keys(allHistoryData).length === 0 && originalStudentNames.length === 0) {
+              allHistoryData = {};
+              originalStudentNames = [];
+          }
+          
+          updateDisplayNames();
+          ensureAllStudentsInData();
+          applyLanguage(currentLang);
+          updateDateDisplay();
+          initStudentsUI();
+          updateTable();
+      }
+
+      // دالة saveAll المعدلة
+      async function saveAll(showMsg = true) {
+          if (!currentTeacherId || !currentClass) return;
+          
+          const dateKey = formattedSelectedDate();
+          allHistoryData[dateKey] = data;
+          
+          // حفظ في localStorage (كنسخة احتياطية)
+          localStorage.setItem(STORAGE_KEY_ORIGINAL_NAMES(), JSON.stringify(originalStudentNames));
+          localStorage.setItem(STORAGE_KEY_DATA(), JSON.stringify(allHistoryData));
+          localStorage.setItem(STORAGE_KEY_TITLE(), boardTitleEl.textContent);
+          
+          // إذا كان وضع السحابة مفعل وهناك مستخدم مسجل، حفظ في Firebase
+          if (storageMode === 'cloud' && currentUser) {
+              try {
+                  const path = FIREBASE_PATH();
+                  if (path) {
+                      const saveData = {
+                          datesData: allHistoryData,
+                          originalStudentNames: originalStudentNames,
+                          boardTitle: boardTitleEl.textContent,
+                          lastUpdated: new Date().toISOString(),
+                          classData: currentClass
+                      };
+                      await firebaseDb.ref(path).set(saveData);
+                      if (showMsg) {
+                          console.log("✅ تم حفظ البيانات في Firebase");
+                      }
+                      return true;
+                  }
+              } catch (error) {
+                  console.error("❌ خطأ في حفظ Firebase:", error);
+                  if (showMsg) {
+                      showMessage(translations[currentLang].firebase.syncError, 'error');
+                  }
+                  return false;
+              }
+          }
+          return true;
+      }
+
+      // دالة loadFromFirebase المعدلة
+      async function loadFromFirebase() {
+          if (!isFirebaseInitialized || !currentUser || storageMode !== 'cloud') return false;
+          if (!currentTeacherId || !currentClass) return false;
+          
+          const path = FIREBASE_PATH();
+          if (!path) return false;
+          
+          try {
+              const snapshot = await firebaseDb.ref(path).once('value');
+              const firebaseData = snapshot.val();
+              
+              if (firebaseData) {
+                  // تحميل البيانات التاريخية
+                  if (firebaseData.datesData) {
+                      allHistoryData = firebaseData.datesData;
+                      localStorage.setItem(STORAGE_KEY_DATA(), JSON.stringify(allHistoryData));
+                  }
+                  
+                  // تحميل أسماء الطلاب
+                  if (firebaseData.originalStudentNames) {
+                      originalStudentNames = firebaseData.originalStudentNames;
+                      localStorage.setItem(STORAGE_KEY_ORIGINAL_NAMES(), JSON.stringify(originalStudentNames));
+                  }
+                  
+                  // تحميل عنوان اللوحة
+                  if (firebaseData.boardTitle) {
+                      boardTitleEl.textContent = firebaseData.boardTitle;
+                      classTitleInput.value = firebaseData.boardTitle.replace(translations[currentLang].boardTitle + " - ", "");
+                  }
+                  
+                  // تحديث البيانات لليوم الحالي
+                  const dateKey = formattedSelectedDate();
+                  if (allHistoryData[dateKey]) {
+                      data = allHistoryData[dateKey];
+                  } else {
+                      data = {};
+                      allHistoryData[dateKey] = data;
+                  }
+                  
+                  console.log("✅ تم تحميل البيانات من Firebase بنجاح");
+                  return true;
+              }
+              return false;
+          } catch (error) {
+              console.error("❌ خطأ في تحميل Firebase:", error);
+              showMessage(translations[currentLang].firebase.syncError, 'error');
+              return false;
+          }
+      }
+
+      // دالة loadDataFromLocalStorage المعدلة
+      function loadDataFromLocalStorage() {
+          const storedData = localStorage.getItem(STORAGE_KEY_DATA());
+          const storedNames = localStorage.getItem(STORAGE_KEY_ORIGINAL_NAMES());
+          
+          if (storedData) {
+              allHistoryData = JSON.parse(storedData);
+          } else {
+              allHistoryData = {};
+          }
+          
+          if (storedNames) {
+              originalStudentNames = JSON.parse(storedNames);
+          } else {
+              // محاولة تحميل الأسماء القديمة
+              const oldNames = JSON.parse(localStorage.getItem(STORAGE_KEY_NAMES())) || [];
+              originalStudentNames = [...oldNames];
+              if (originalStudentNames.length > 0) {
+                  localStorage.setItem(STORAGE_KEY_ORIGINAL_NAMES(), JSON.stringify(originalStudentNames));
+              }
+          }
+          
+          // تهيئة بيانات اليوم الحالي
+          const dateKey = formattedSelectedDate();
+          if (allHistoryData[dateKey]) {
+              data = allHistoryData[dateKey];
+          } else {
+              data = {};
+              allHistoryData[dateKey] = data;
+          }
+      }
+
+      // دالة initializeFirebaseAuth المعدلة
+      function initializeFirebaseAuth() {
+          if (!isFirebaseInitialized) return;
+          firebaseAuth.onAuthStateChanged((user) => {
+              currentUser = user;
+              updateFirebaseUI();
+              if (user) {
+                  if (storageMode === 'cloud' && currentTeacherId && currentClass) {
+                      // مزامنة تلقائية عند تسجيل الدخول
+                      syncDataFromFirebase().then(() => {
+                          loadData();
+                      });
+                  }
+              } else {
+                  if (storageMode === 'cloud') setStorageMode('local');
+              }
+          });
+      }
+
       function updateFirebaseUI() {
         const t = translations[currentLang];
         if (currentUser) { const email = currentUser.email || t.firebase.offline; firebaseStatus.innerHTML = `<i class="fas fa-user"></i> ${email.substring(0, 20)}`; firebaseStatus.className = 'firebase-status online'; loginBtn.innerHTML = '<i class="fas fa-sign-out-alt"></i> ' + (currentLang === 'ar' ? 'تسجيل الخروج' : 'Logout'); }
@@ -714,11 +933,6 @@
         if (!isFirebaseInitialized || !currentUser || storageMode !== 'cloud') return; if (!currentTeacherId || !currentClass) return; const path = FIREBASE_PATH(); if (!path) return;
         try { const saveData = { datesData: allHistoryData, originalStudentNames: originalStudentNames, boardTitle: boardTitleEl.textContent, lastUpdated: new Date().toISOString() }; await firebaseDb.ref(path).set(saveData); console.log("Full History saved to Firebase"); return true; } catch (error) { console.error("Error saving to Firebase:", error); showMessage(translations[currentLang].firebase.syncError, 'error'); return false; }
       }
-      async function loadFromFirebase() {
-        if (!isFirebaseInitialized || !currentUser || storageMode !== 'cloud') return false; if (!currentTeacherId || !currentClass) return false; const path = FIREBASE_PATH(); if (!path) return false;
-        try { const snapshot = await firebaseDb.ref(path).once('value'); const firebaseData = snapshot.val(); if (firebaseData) { if (firebaseData.datesData) { allHistoryData = firebaseData.datesData; localStorage.setItem(STORAGE_KEY_DATA(), JSON.stringify(allHistoryData)); } if (firebaseData.originalStudentNames) { originalStudentNames = firebaseData.originalStudentNames; localStorage.setItem(STORAGE_KEY_ORIGINAL_NAMES(), JSON.stringify(originalStudentNames)); } if (firebaseData.boardTitle) { boardTitleEl.textContent = firebaseData.boardTitle; classTitleInput.value = boardTitleEl.textContent.replace(translations[currentLang].boardTitle + " - ", ""); } console.log("Data loaded from Firebase"); loadDataFromLocalStorage(); // سيقوم بتحديث data لليوم الحالي
-          return true; } return false; } catch (error) { console.error("Error loading from Firebase:", error); showMessage(translations[currentLang].firebase.syncError, 'error'); return false; }
-      }
       async function syncData() { if (!isFirebaseInitialized || !currentUser || storageMode !== 'cloud') { showMessage("يجب تفعيل وضع السحابة وتسجيل الدخول أولاً", 'error'); return; } const t = translations[currentLang]; const saved = await saveAll(true); if (saved) showMessage(t.firebase.syncSuccess, 'success'); }
       function showLoginForm() { loginForm.classList.add('show'); } function hideLoginForm() { loginForm.classList.remove('show'); loginEmail.value = ''; loginPassword.value = ''; loginMessage.textContent = ''; }
       async function loginWithEmail() { const email = loginEmail.value.trim(); const password = loginPassword.value.trim(); if (!email || !password) { showMessage("الرجاء إدخال البريد الإلكتروني وكلمة المرور", 'error'); return; } try { await firebaseAuth.signInWithEmailAndPassword(email, password); showMessage(translations[currentLang].firebase.loginSuccess, 'success'); hideLoginForm(); } catch (error) { showMessage(`خطأ في تسجيل الدخول: ${error.message}`, 'error'); } }
@@ -731,26 +945,10 @@
       function getSubjectIcon(subject) { const map = { 'اجتماعيات': 'fa-globe', 'فنية': 'fa-palette', 'لغة عربية': 'fa-book', 'لغتي': 'fa-language', 'تربية إسلامية': 'fa-moon', 'رياضيات': 'fa-calculator', 'علوم': 'fa-flask' }; return map[subject] || 'fa-chalkboard-user'; }
       function selectTeacher(teacherId) { currentTeacherId = teacherId; const teacher = teachersList.find(t => t.id === teacherId); if (!teacher) return; const iconClass = teacher.icon || getSubjectIcon(teacher.subject); teacherCardContainer.innerHTML = `<div class="teacher-card"><div class="teacher-icon"><i class="fa-solid ${iconClass}"></i></div><div class="teacher-info"><h3>${teacher.name}</h3><p>التخصص: ${teacher.subject}</p></div></div>`; if (currentClass) loadData(); }
       function selectClass(classId) { currentClass = classId; if (currentTeacherId) loadData(); }
-      async function loadData() { if (!currentTeacherId || !currentClass) return; let loaded = false; if (storageMode === 'cloud' && currentUser) loaded = await loadFromFirebase(); if (!loaded) loadDataFromLocalStorage(); updateDisplayNames(); ensureAllStudentsInData(); // تأكد من وجود الطلاب في data
-        applyLanguage(currentLang); updateDateDisplay(); initStudentsUI(); updateTable(); }
-      function loadDataFromLocalStorage() { 
-          allHistoryData = JSON.parse(localStorage.getItem(STORAGE_KEY_DATA())) || {}; 
-          originalStudentNames = JSON.parse(localStorage.getItem(STORAGE_KEY_ORIGINAL_NAMES())) || []; 
-          
-          // إذا كان هناك قائمة قديمة بأسماء الطلاب (من الإصدارات السابقة) نقوم بتحويلها
-          if (originalStudentNames.length === 0) { 
-              const oldNames = JSON.parse(localStorage.getItem(STORAGE_KEY_NAMES())) || []; 
-              originalStudentNames = [...oldNames]; 
-              // حفظ الأسماء الجديدة
-              localStorage.setItem(STORAGE_KEY_ORIGINAL_NAMES(), JSON.stringify(originalStudentNames));
-          }
-          
-          // تأكد من أن بيانات اليوم الحالي موجودة ومحدثة
-          ensureAllStudentsInData();
-      }
+      
       function updateDisplayNames() { if (originalStudentNames.length === 0) { studentNames = []; return; } if (currentLang === 'en') studentNames = arabicToEnglishNames(originalStudentNames); else studentNames = [...originalStudentNames]; }
       function updateDateDisplay() { const dateStr = formattedSelectedDate(); currentDateDisplayEl.textContent = dateStr; }
-      async function saveAll(showMsg = true) { if (!currentTeacherId || !currentClass) return; const dateKey = formattedSelectedDate(); allHistoryData[dateKey] = data; localStorage.setItem(STORAGE_KEY_ORIGINAL_NAMES(), JSON.stringify(originalStudentNames)); localStorage.setItem(STORAGE_KEY_DATA(), JSON.stringify(allHistoryData)); localStorage.setItem(STORAGE_KEY_TITLE(), boardTitleEl.textContent); if (storageMode === 'cloud' && currentUser) await saveToFirebase(); }
+      
       function saveTeachersList() { localStorage.setItem('teachers_list', JSON.stringify(teachersList)); }
 
       importTeachersInput.addEventListener("change", (e) => { const file = e.target.files[0]; if (!file) return; const reader = new FileReader(); reader.onload = (evt) => { try { const wb = XLSX.read(evt.target.result, { type: "binary" }); const sheet = wb.Sheets[wb.SheetNames[0]]; const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }); let addedCount = 0; rows.forEach(row => { const name = row[0] ? row[0].toString().trim() : null; const subject = (row[1] ? row[1].toString().trim() : null) || newTeacherSubjectSelect.value || "أخرى"; if (name) { const exists = teachersList.find(t => t.name === name); if (!exists) { teachersList.push({ id: 't_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5), name: name, subject: subject, icon: getSubjectIcon(subject) }); addedCount++; } } }); if (addedCount > 0) { saveTeachersList(); showMessage(currentLang === 'ar' ? `تم استيراد ${addedCount} معلم` : `Imported ${addedCount} teachers`, 'success'); } else { showMessage(currentLang === 'ar' ? "لم يتم إضافة معلمين" : "No teachers added", 'info'); } importTeachersInput.value = ''; } catch (error) { console.error(error); showMessage(currentLang === 'ar' ? "خطأ في قراءة الملف" : "Error reading file", 'error'); } }; reader.readAsBinaryString(file); });
